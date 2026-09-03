@@ -1,0 +1,5 @@
+resource_id,resource_type,name,available_units,unit_cost
+TEAM-OHE-01,OHE team,Traction maintenance team A,1,18000
+TEAM-TRK-01,Track team,Track geometry team B,1,14000
+TEAM-SIG-01,Signal team,Signalling inspection team C,1,12000
+MACHINE-TAMP,Machine,Tamper and geometry recorder,1,22000

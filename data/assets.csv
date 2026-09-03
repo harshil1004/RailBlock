@@ -1,0 +1,5 @@
+asset_id,section_id,asset_type,temperature,vibration,wear_percentage,failure_history,inspection_date,electrical_load,last_maintenance
+OHE-121,SEC-121,OHE,68.4,7.8,38,2,2026-08-22,82.5,2026-07-15
+TRK-122,SEC-122,Track,44.1,5.6,29,1,2026-08-25,76.0,2026-07-28
+OHE-086,SEC-086,OHE,52.7,3.1,16,0,2026-08-28,61.4,2026-08-04
+TRK-086,SEC-086,Track,39.8,4.2,24,1,2026-08-20,58.7,2026-07-22

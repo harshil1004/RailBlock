@@ -1,0 +1,15 @@
+train_no,name,train_type,direction,service_time,source,scheduled
+22683,Yesvantpur-Lucknow SF,Express,Bengaluru -> Dharmavaram,00:03,YNK,True
+18064,Yelahanka-Santragachi AC Express,Express,Bengaluru -> Dharmavaram,04:50,YNK,True
+22832,Yesvantpur-Howrah Superfast,Express,Bengaluru -> Dharmavaram,04:52,YNK,True
+66559,KSR Bengaluru-Anantapur MEMU,Passenger,Bengaluru -> Dharmavaram,08:55,BYPL,True
+12975,Mysuru-Jaipur SF Express,Express,Bengaluru -> Dharmavaram,13:12,BNC,True
+18464,Prashanti Express,Express,Bengaluru -> Dharmavaram,13:52,BNC,True
+20704,Yesvantpur-Kacheguda Vande Bharat,Express,Bengaluru -> Dharmavaram,14:45,YPR,True
+12628,Karnataka Express,Express,Dharmavaram -> Bengaluru,07:30,DMM,True
+16594,Nanded-KSR Bengaluru Express,Express,Dharmavaram -> Bengaluru,08:35,DMM,True
+17211,Kondaveedu Express,Express,Dharmavaram -> Bengaluru,10:15,DMM,True
+16572,Bidar-KSR Bengaluru Express,Express,Dharmavaram -> Bengaluru,19:20,DMM,True
+F-401,COA Freight forecast - cement,Goods,Dharmavaram -> Bengaluru,01:10,COA,False
+F-402,COA Freight forecast - container,Goods,Bengaluru -> Dharmavaram,03:25,COA,False
+F-403,COA Freight forecast - grain,Goods,Dharmavaram -> Bengaluru,22:15,COA,False

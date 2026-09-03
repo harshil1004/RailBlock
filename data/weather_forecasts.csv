@@ -1,0 +1,4 @@
+forecast_day,condition,rainfall_mm,rain_probability,wind_kmh,visibility_km,planning_factor
+2026-09-02,Humid light rain after 18:00,6.5,55,18,8.0,1.1
+2026-09-03,Clear morning thunderstorms possible,12.0,70,24,6.5,1.25
+2026-09-04,Dry and clear,0.0,5,11,10.0,1.0

@@ -1,0 +1,5 @@
+event_id,entity_type,entity_id,action,actor,reason,created_at
+1,request,BR-1045,created,demo-user,,2026-09-03T18:05:50
+2,request,BR-1046,created,demo-user,,2026-09-03T19:20:36
+3,block,BP-220,approve,demo-user,,2026-09-03T22:29:28
+4,block,BP-220,approve,demo-user,,2026-09-03T22:37:40
