@@ -8,6 +8,15 @@ from urllib.parse import quote
 
 import httpx
 
+from backend.rail_traffic_models import (
+    Corridor,
+    TrainPosition,
+    TrainSchedule,
+    normalize_corridor,
+    normalize_train_position,
+    normalize_train_schedule,
+)
+
 
 class RailTrafficError(Exception):
     """Base error for the server-side railway traffic integration."""
@@ -31,7 +40,7 @@ class RailTrafficAuthError(RailTrafficProviderError):
 
 @dataclass
 class TrafficFeed:
-    trains: list[dict[str, Any]]
+    trains: list[TrainPosition]
     fetched_at: str
     last_updated: Optional[str]
     stale: bool
@@ -64,20 +73,31 @@ class RailTrafficProvider:
     def getLiveTrains(self) -> dict[str, Any]:
         return self._get_feed("/trains")
 
-    def getTrainById(self, trainId: str) -> Optional[dict[str, Any]]:
+    def getTrainById(self, trainId: str) -> Optional[TrainPosition]:
         feed = self._get_feed(f"/trains/{quote(trainId, safe='')}")
         return feed["trains"][0] if feed["trains"] else None
 
     def getTrainsInCorridor(self, corridor: str) -> dict[str, Any]:
         return self._get_feed("/trains", {"corridor": corridor})
 
+    def getSchedules(self, trainId: Optional[str] = None) -> list[TrainSchedule]:
+        params = {"trainId": trainId} if trainId else None
+        payload = self._request_json("/schedules", params)
+        schedules = self._extract_collection(payload, "schedules")
+        return [schedule for schedule in (normalize_train_schedule(item) for item in schedules) if schedule is not None]
+
+    def getCorridors(self) -> list[Corridor]:
+        payload = self._request_json("/corridors", None)
+        corridors = self._extract_collection(payload, "corridors")
+        return [corridor for corridor in (normalize_corridor(item) for item in corridors) if corridor is not None]
+
     def _get_feed(self, path: str, params: Optional[dict[str, str]] = None) -> dict[str, Any]:
         payload = self._request_json(path, params)
         fetched_at = datetime.now(timezone.utc).isoformat()
         raw_trains, last_updated = self._extract_trains(payload)
-        trains = [self._normalize_train(train) for train in raw_trains]
-        trains = [train for train in trains if train is not None]
         stale = self._is_stale(last_updated, fetched_at)
+        trains = [normalize_train_position(train, fetched_at, stale) for train in raw_trains]
+        trains = [train for train in trains if train is not None]
         return {
             "trains": trains,
             "fetchedAt": fetched_at,
@@ -161,22 +181,17 @@ class RailTrafficProvider:
         return trains, payload.get("lastUpdated") or payload.get("updatedAt") or payload.get("timestamp")
 
     @staticmethod
-    def _normalize_train(train: Any) -> Optional[dict[str, Any]]:
-        if not isinstance(train, dict):
-            return None
-        train_no = train.get("trainNo") or train.get("trainNumber") or train.get("train_no") or train.get("no") or train.get("id")
-        service_time = train.get("serviceTime") or train.get("scheduledTime") or train.get("service_time") or train.get("time")
-        if train_no is None or not service_time:
-            return None
-        return {
-            "no": str(train_no),
-            "name": str(train.get("name") or train.get("trainName") or "Unknown train"),
-            "type": str(train.get("type") or train.get("trainType") or train.get("train_type") or "Passenger"),
-            "dir": str(train.get("direction") or train.get("dir") or ""),
-            "time": str(service_time),
-            "source": str(train.get("source") or "live-api"),
-            "scheduled": bool(train.get("scheduled", True)),
-        }
+    def _extract_collection(payload: Any, key: str) -> list[Any]:
+        if isinstance(payload, list):
+            return payload
+        if not isinstance(payload, dict):
+            raise RailTrafficProviderError("Rail traffic provider returned an unexpected payload")
+        collection = payload.get(key) or payload.get("data") or payload.get("results") or []
+        if isinstance(collection, dict):
+            collection = collection.get(key) or collection.get("items") or []
+        if not isinstance(collection, list):
+            raise RailTrafficProviderError(f"Rail traffic provider returned an invalid {key} collection")
+        return collection
 
     def _is_stale(self, last_updated: Optional[str], fetched_at: str) -> bool:
         if not last_updated:

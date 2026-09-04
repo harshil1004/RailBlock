@@ -47,4 +47,14 @@ The backend exposes normalized traffic data through:
 - `GET /api/traffic/trains/{train_id}`
 - `GET /api/traffic/corridor?corridor=Bengaluru%20%E2%80%93%20Dharmavaram`
 
-The provider adapter applies an 8-second timeout by default, retries transient failures and rate limits twice, reports empty feeds, and marks responses stale when their provider timestamp is older than `RAIL_TRAFFIC_STALE_AFTER_SECONDS`. Provider-specific payload fields are not returned to the frontend.
+The provider adapter applies an 8-second timeout by default, retries transient failures and rate limits twice, reports empty feeds, and marks responses stale when their provider timestamp is older than `RAIL_TRAFFIC_STALE_AFTER_SECONDS`. `LiveRailTrafficService` refreshes every 30 seconds by default; configure this with `RAIL_TRAFFIC_REFRESH_INTERVAL_SECONDS`. Provider-specific payload fields are not returned to the frontend.
+
+Normalized traffic contracts are defined in `backend/rail_traffic_models.py`: `TrainPosition`, `TrainSchedule`, and `Corridor`. Their safe normalization helpers tolerate missing provider fields and expose only internal field names to planning code.
+
+`RailwayCorridorMatchingService` uses the shared live cache and a replaceable `PrototypeCorridorMapping`. Use `GET /api/traffic/corridor-states` with corridor query fields to receive normalized `TrainCorridorState` results. Without trusted GIS section mappings, distance and entry/exit estimates remain `null` instead of being inferred from latitude/longitude.
+
+The deterministic `BlockConflictAnalysisEngine` is available through `GET /api/conflicts/{block_id}` with the selected corridor query fields. It returns passenger and freight conflict explanations, probabilities, nearest conflict time, operational risk, and feasibility. It is not an ML model.
+
+## ML decision-support layer
+
+XGBoost and LightGBM are not installed in the prototype environment, so `backend/ml_prediction_service.py` provides the replacement model-service boundary and deterministic fallback functions: `predictMaintenanceRisk()`, `predictExpectedMaintenanceDuration()`, and `predictBlockConflictRisk()`. Each result includes its prediction, probability/score, `modelVersion`, timestamp, and `featuresUsed`, and is labeled `SYNTHETIC PROTOTYPE DATA`. No accuracy number is claimed. These predictions do not override deterministic safety constraints or block feasibility; the conflict endpoint returns the ML result separately under `mlDecisionSupport`.

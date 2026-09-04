@@ -20,12 +20,18 @@ from backend.rail_traffic_provider import (
     RailTrafficProviderError,
     RailTrafficRateLimited,
 )
+from backend.rail_traffic_models import Corridor, normalize_train_schedule
+from backend.live_rail_traffic_service import LiveRailTrafficService
+from backend.block_conflict_engine import BlockConflictAnalysisEngine, CandidateBlock, ExistingBlock, FreightForecast
+from backend.ml_prediction_service import predictBlockConflictRisk
 
 app = FastAPI(title="RailBlock AI")
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 app.mount("/static", StaticFiles(directory=ROOT / "frontend"), name="static")
 DATA_LOCK = threading.RLock()
+live_rail_traffic = LiveRailTrafficService()
+block_conflict_engine = BlockConflictAnalysisEngine()
 
 FIELDS = {
     "trains": ["train_no", "name", "train_type", "direction", "service_time", "source", "scheduled"],
@@ -293,6 +299,12 @@ def initialize_data():
 @app.on_event("startup")
 def startup():
     initialize_data()
+    live_rail_traffic.start()
+
+
+@app.on_event("shutdown")
+def shutdown():
+    live_rail_traffic.stop()
 
 
 class RequestIn(BaseModel):
@@ -443,13 +455,13 @@ def temporally_compatible(request_row, other_row):
 
 def safety_window_conflicts(window_start, window_end, train_rows):
     conflicts = []
-    for row in train_rows:
-        if row.get("train_type") == "Goods":
+    for schedule in train_rows:
+        if schedule.trainType == "Goods":
             continue
-        train_start = hmin(row["service_time"])
+        train_start = hmin(schedule.scheduledDeparture or schedule.scheduledArrival)
         train_end = train_start + 30
         if times_overlap(window_start, window_end, train_start, train_end):
-            conflicts.append(row["train_no"])
+            conflicts.append(schedule.trainNumber)
     return conflicts
 
 
@@ -582,7 +594,7 @@ def generate_ai_plan_for_request(request_row, all_requests, blocks, trains, weat
             continue
         if not times_overlap(hmin(window_start), hmin(window_end), block_start, block_end):
             continue
-        block_conflicts = [row["train_no"] for row in trains if row.get("train_type") != "Goods" and times_overlap(block_start, block_end, hmin(row["service_time"]), hmin(row["service_time"]) + 30)]
+        block_conflicts = [schedule.trainNumber for schedule in trains if schedule.trainType != "Goods" and times_overlap(block_start, block_end, hmin(schedule.scheduledDeparture or schedule.scheduledArrival), hmin(schedule.scheduledDeparture or schedule.scheduledArrival) + 30)]
         if block_conflicts:
             continue
         candidate_blocks.append({**block, "duration_minutes": max(0, block_end - block_start), "passenger_conflicts": block_conflicts})
@@ -651,7 +663,7 @@ def build_candidate_windows(day, block_rows, train_rows, request_rows, weather_r
             continue
         block_start = hmin(block.get("start_time") or "00:00")
         block_end = hmin(block.get("end_time") or "23:59")
-        passenger_conflicts = [row["train_no"] for row in train_rows if row.get("train_type") != "Goods" and times_overlap(block_start, block_end, hmin(row["service_time"]), hmin(row["service_time"]) + 30)]
+        passenger_conflicts = [schedule.trainNumber for schedule in train_rows if schedule.trainType != "Goods" and times_overlap(block_start, block_end, hmin(schedule.scheduledDeparture or schedule.scheduledArrival), hmin(schedule.scheduledDeparture or schedule.scheduledArrival) + 30)]
         linked = [row for row in day_requests if ranges_overlap(float(row.get("km_from", 0) or 0), float(row.get("km_to", 0) or 0), float(block.get("km_from", 0) or 0), float(block.get("km_to", 0) or 0))]
         request = (linked or active_requests or [{
             "priority": "Medium",
@@ -677,6 +689,11 @@ def build_candidate_windows(day, block_rows, train_rows, request_rows, weather_r
 
 def train_row(row):
     return {"no": row["train_no"], "name": row["name"], "type": row["train_type"], "dir": row["direction"], "time": row["service_time"], "source": row["source"], "scheduled": as_bool(row["scheduled"])}
+
+
+def train_schedules(rows):
+    schedules = [normalize_train_schedule(row) for row in rows]
+    return [schedule for schedule in schedules if schedule is not None]
 
 
 def request_row(row):
@@ -735,10 +752,7 @@ def traffic_provider_error(error):
 
 @app.get("/api/traffic/live")
 def live_traffic():
-    try:
-        return RailTrafficProvider().getLiveTrains()
-    except RailTrafficError as error:
-        traffic_provider_error(error)
+    return live_rail_traffic.snapshot().to_dict()
 
 
 @app.get("/api/traffic/trains/{train_id}")
@@ -758,6 +772,32 @@ def corridor_traffic(corridor: str):
         return RailTrafficProvider().getTrainsInCorridor(corridor)
     except RailTrafficError as error:
         traffic_provider_error(error)
+
+
+@app.get("/api/traffic/corridor-states")
+def corridor_states(corridor_id: str, name: str, from_station: str, to_station: str, line: str = "", direction: str = "", from_km: Optional[float] = None, to_km: Optional[float] = None):
+    corridor = Corridor(corridor_id, name, from_station, to_station, from_km, to_km, line, direction, None, True)
+    return {"corridor": corridor.to_dict(), "states": [state.to_dict() for state in live_rail_traffic.match_corridor(corridor)]}
+
+
+@app.get("/api/conflicts/{block_id}")
+def block_conflicts(block_id: str, corridor_id: str, name: str, from_station: str, to_station: str, line: str = "", direction: str = "", from_km: Optional[float] = None, to_km: Optional[float] = None):
+    with repository():
+        block_row_data = next((row for row in read_rows("blocks") if row["block_id"] == block_id), None)
+        train_rows = read_rows("trains")
+        block_rows = read_rows("blocks")
+    if not block_row_data:
+        raise HTTPException(404, "Block not found")
+    corridor = Corridor(corridor_id, name, from_station, to_station, from_km, to_km, line, direction, None, True)
+    candidate = CandidateBlock(block_id, block_row_data["block_day"], block_row_data["start_time"], block_row_data["end_time"], corridor_id, float(block_row_data["km_from"]), float(block_row_data["km_to"]))
+    schedules = train_schedules(train_rows)
+    forecasts = [FreightForecast(schedule.trainId, schedule.trainNumber, schedule.scheduledDeparture or schedule.scheduledArrival, schedule.actualDeparture or schedule.scheduledDeparture or schedule.scheduledArrival, schedule.direction, schedule.line, schedule.section, schedule.delayMinutes) for schedule in schedules if schedule.trainType.lower() == "goods"]
+    existing = [ExistingBlock(row["block_id"], row["block_day"], row["start_time"], row["end_time"], corridor_id, float(row["km_from"]), float(row["km_to"]), row["status"]) for row in block_rows if row["block_id"] != block_id]
+    snapshot = live_rail_traffic.snapshot()
+    result = block_conflict_engine.analyze(candidate, snapshot.trains, schedules, forecasts, corridor, existing)
+    response = result.to_dict()
+    response["mlDecisionSupport"] = predictBlockConflictRisk(candidate, corridor, schedules, snapshot.trains, forecasts, existing, result).to_dict()
+    return response
 
 
 def build_shared_state():
@@ -785,7 +825,7 @@ def insights(day: date = date(2026, 9, 3)):
         weather = next((row for row in read_rows("weather_forecasts") if row["forecast_day"] == day.isoformat()), None)
         demand = next((row for row in read_rows("traffic_demand") if row["demand_day"] == day.isoformat()), None)
         resources = sorted(read_rows("resources"), key=lambda row: row["resource_id"])
-        trains = sorted(read_rows("trains"), key=lambda row: row["service_time"])
+        trains = train_schedules(sorted(read_rows("trains"), key=lambda row: row["service_time"]))
         requests = [request_row(row) for row in read_rows("requests")]
         request_rows = read_rows("requests")
         block_rows = read_rows("blocks")
@@ -797,10 +837,10 @@ def insights(day: date = date(2026, 9, 3)):
     resource_data = [{"id": row["resource_id"], "type": row["resource_type"], "name": row["name"], "availableUnits": int(row["available_units"]), "unitCost": int(row["unit_cost"])} for row in resources]
     candidate_windows = build_candidate_windows(day, block_rows, trains, request_rows, weather_rows, demand_rows)
     recommended_window = candidate_windows[0] if candidate_windows else {"start": "00:00", "end": "01:00", "score": 0, "reason": "No block is available for this date", "blockId": ""}
-    conflicts = [{"trainNo": row["train_no"], "name": row["name"], "time": row["service_time"], "reason": "Train movement overlaps the current active block"} for row in trains if recommended_window["start"] <= row["service_time"] <= recommended_window["end"]]
+    conflicts = [{"trainNo": schedule.trainNumber, "name": "Unknown train", "time": schedule.scheduledDeparture or schedule.scheduledArrival, "reason": "Train movement overlaps the current active block"} for schedule in trains if recommended_window["start"] <= (schedule.scheduledDeparture or schedule.scheduledArrival) <= recommended_window["end"]]
     compatible = [request for request in requests if request["status"] in ("Approved", "Pending COA", "Coordination hold") and request["kmFrom"] < 123.1 and request["kmTo"] > 121.4]
     bundles = [{"blockId": recommended_window["blockId"], "works": [request["id"] for request in compatible], "kmFrom": 121.4, "kmTo": 123.1, "duration": max((request["duration"] for request in compatible), default=0), "resourceFit": min(len(resource_data), len(compatible))}] if recommended_window["blockId"] else []
-    opportunities = build_bundling_opportunities(request_rows, block_rows, read_rows("trains"), weather_rows, demand_rows)
+    opportunities = build_bundling_opportunities(request_rows, block_rows, trains, weather_rows, demand_rows)
     return {"day": day.isoformat(), "assets": asset_data, "weather": weather_data, "demand": demand_data, "resources": resource_data, "trainConflicts": conflicts, "candidateWindows": candidate_windows, "bundles": bundles, "bundlingOpportunities": opportunities, "recommendedPlan": {"window": recommended_window, "work": [request["work"] for request in compatible], "explanation": recommended_window["reason"]}}
 
 
@@ -817,12 +857,12 @@ def request_history(request_id: str):
 def simulate(body: SimulationIn):
     with repository():
         weather = next((row for row in read_rows("weather_forecasts") if row["forecast_day"] == body.day.isoformat()), None)
-        trains = read_rows("trains")
+        trains = train_schedules(read_rows("trains"))
     rainfall = body.rainfallPercent if body.rainfallPercent is not None else (int(weather["rain_probability"]) if weather else 0)
     factor = (float(weather["planning_factor"]) if weather else 1) + (0.2 if rainfall >= 60 else 0)
     start = hmin(body.start)
     end = start + body.duration + body.addMinutes
-    conflicts = [{"trainNo": row["train_no"], "name": row["name"], "time": row["service_time"]} for row in trains if start <= hmin(row["service_time"]) <= end]
+    conflicts = [{"trainNo": schedule.trainNumber, "name": "Unknown train", "time": schedule.scheduledDeparture or schedule.scheduledArrival} for schedule in trains if start <= hmin(schedule.scheduledDeparture or schedule.scheduledArrival) <= end]
     traffic_penalty = 18 if body.trafficLevel == "festival_peak" else 0
     base_score = 100 - min(55, len(conflicts) * 18) - min(20, int(rainfall)) - traffic_penalty - max(0, body.addMinutes // 10)
     return {"feasible": not conflicts and end <= 1440, "score": max(0, round(base_score / factor)), "start": body.start, "end": f"{(end // 60) % 24:02d}:{end % 60:02d}", "rainfallPercent": rainfall, "conflicts": conflicts, "explanation": "Window is clear." if not conflicts else "Move the window to avoid scheduled train movements."}
@@ -875,7 +915,7 @@ def create_request(req: RequestIn):
         all_block_rows = read_rows("blocks")
         block_rows = all_block_rows
         all_requests = [row for row in read_rows("requests") if row["request_day"] == req.day.isoformat() and row["request_id"] != request_id]
-        ai_plan = generate_ai_plan_for_request(new_row, all_requests, block_rows, read_rows("trains"), weather, demand)
+        ai_plan = generate_ai_plan_for_request(new_row, all_requests, block_rows, train_schedules(read_rows("trains")), weather, demand)
         new_row["risk"] = str(ai_plan["aiPriorityScore"])
         new_row["ai_priority_score"] = str(ai_plan["aiPriorityScore"])
         new_row["ai_priority_level"] = ai_plan["aiPriorityLevel"]
@@ -897,7 +937,7 @@ def request_plan(request_id: str):
             raise HTTPException(404, "Request not found")
         day = request["request_day"]
         weather = next((row for row in read_rows("weather_forecasts") if row["forecast_day"] == day), None)
-        trains = read_rows("trains")
+        trains = train_schedules(read_rows("trains"))
         blocks = read_rows("blocks")
         all_requests = [row for row in read_rows("requests") if row["request_day"] == day and row["request_id"] != request_id and row["status"] not in ("Rejected", "Completed")]
         demand = next((row for row in read_rows("traffic_demand") if row["demand_day"] == day), None)
